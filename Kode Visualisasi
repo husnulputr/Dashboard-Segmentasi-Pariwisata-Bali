@@ -1,0 +1,240 @@
+library(shiny)
+library(bs4Dash)
+library(tidyverse)
+library(cluster)
+library(factoextra)
+library(DT)
+library(plotly)
+library(ggpubr)
+
+# ==========================================
+# 1. CSS CUSTOM (Glassmorphism Style)
+# ==========================================
+custom_css <- "
+  /* Background Utama */
+  .content-wrapper { background-color: #f4f7fc; }
+  
+  /* Card/Box Style seperti Gambar */
+  .card {
+    border-radius: 20px !important;
+    border: none !important;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.05) !important;
+    transition: transform 0.3s ease;
+  }
+  .card:hover { transform: translateY(-5px); }
+  
+  /* Sidebar Ungu Modern */
+  .main-sidebar {
+    background: linear-gradient(180deg, #6a5acd 0%, #483d8b 100%) !important;
+    border-radius: 0 30px 30px 0;
+  }
+  .nav-pills .nav-link.active {
+    background-color: rgba(255,255,255,0.2) !important;
+    border-radius: 12px;
+  }
+  
+  /* Widget Box Colors */
+  .bg-primary { background: linear-gradient(135deg, #6a5acd, #8360c3) !important; }
+  .bg-info { background: linear-gradient(135deg, #4facfe, #00f2fe) !important; }
+  .bg-warning { background: linear-gradient(135deg, #feb47b, #ff7e5f) !important; }
+  .bg-danger { background: linear-gradient(135deg, #ff758c, #ff7eb3) !important; }
+
+  /* Navbar clean */
+  .main-header { border-bottom: none !important; }
+"
+
+# ==========================================
+# 2. DATA INPUT & PROCESSING
+# ==========================================
+# (Data loading logic tetap sama seperti kode Anda)
+raw_data <- read.csv("DASHBOARD SEGMENTASI WISATA BALI/Destinasi Wisata Bali.csv", stringsAsFactors = FALSE)
+clean_data <- raw_data %>%
+  mutate(totalScore = as.numeric(totalScore), reviewsCount = as.numeric(reviewsCount)) %>%
+  drop_na(totalScore, reviewsCount, title) %>%
+  distinct(title, .keep_all = TRUE) %>%
+  filter(reviewsCount >= 0) %>%
+  mutate(
+    Skor_Kenyamanan = totalScore * 20,
+    Skor_Popularitas = log(reviewsCount + 1),
+    city = ifelse(city == "" | is.na(city), "Other", city)
+  )
+
+# ==========================================
+# 3. UI DESIGN
+# ==========================================
+ui <- dashboardPage(
+  dark = NULL,
+  help = NULL,
+  fullscreen = TRUE,
+  scrollToTop = TRUE,
+  
+  header = dashboardHeader(
+    title = dashboardBrand(title = "Bali Insights", color = "white"),
+    rightUi = userOutput("user")
+  ),
+  
+  # Sidebar Kiri (Hanya Menu Navigasi)
+  sidebar = dashboardSidebar(
+    fixed = TRUE,
+    skin = "dark",
+    status = "primary",
+    sidebarMenu(
+      menuItem("Dashboard", tabName = "overview", icon = icon("th-large")),
+      menuItem("Clusters", tabName = "segmentasi", icon = icon("layer-group")),
+      menuItem("Analytics", tabName = "popularitas", icon = icon("chart-line")),
+      menuItem("Data", tabName = "data", icon = icon("database"))
+    )
+  ),
+  
+  # Widget Menu Kanan (Bisa Buka Tutup) untuk Filter
+  controlbar = dashboardControlbar(
+    id = "controlbar",
+    pinned = FALSE,
+    overlay = TRUE,
+    skin = "light",
+    controlbarMenu(
+      id = "controlbarMenu",
+      controlbarItem(
+        "Filters",
+        column(12,
+          h5("Parameter Data", style = "margin-top: 20px;"),
+          selectInput("filter_city", "Pilih Kota:", choices = c("All", sort(unique(clean_data$city)))),
+          selectInput("filter_cat", "Kategori:", choices = c("All", sort(unique(clean_data$categoryName)))),
+          sliderInput("filter_rating", "Rating:", min = 0, max = 5, value = c(0, 5)),
+          hr(),
+          h5("Setting Cluster"),
+          numericInput("k_cluster", "Jumlah k:", value = 3, min = 2, max = 6),
+          selectInput("linkage_method", "Linkage:", choices = c("ward.D2", "complete"))
+        )
+      )
+    )
+  ),
+  
+  body = dashboardBody(
+    tags$style(custom_css),
+    tabItems(
+      tabItem(
+        tabName = "overview",
+        # Baris Value Boxes (Modern Style)
+        fluidRow(
+          valueBoxOutput("box_total_dest", width = 4),
+          valueBoxOutput("box_avg_rating", width = 4),
+          valueBoxOutput("box_total_rev", width = 4)
+        ),
+        # Visualisasi Utama
+        fluidRow(
+          box(
+            title = "Top Popular Destinations",
+            status = "primary", width = 8, solidHeader = FALSE,
+            plotlyOutput("plot_top_dest", height = "400px")
+          ),
+          box(
+            title = "Cluster Share",
+            status = "primary", width = 4,
+            plotlyOutput("plot_pie_cluster", height = "400px")
+          )
+        ),
+        uiOutput("insight_box")
+      ),
+      
+      tabItem(
+        tabName = "segmentasi",
+        fluidRow(
+          box(title = "PCA Analysis", status = "primary", width = 7, plotOutput("plot_cluster_pca")),
+          box(title = "Dendrogram", status = "info", width = 5, plotOutput("plot_dendro"))
+        )
+      ),
+      
+      tabItem(
+        tabName = "popularitas",
+        box(title = "Popularity vs Rating", width = 12, status = "danger", plotlyOutput("plot_scatter"))
+      ),
+      
+      tabItem(
+        tabName = "data",
+        box(title = "Table Explorer", width = 12, DTOutput("table_raw"))
+      )
+    )
+  ),
+  
+  footer = dashboardFooter(left = "Bali Tourism", right = "2024")
+)
+
+# ==========================================
+# 4. SERVER LOGIC
+# ==========================================
+server <- function(input, output, session) {
+  
+  # Reactive Data (Sama seperti sebelumnya)
+  processed_data <- reactive({
+    df <- clean_data
+    if(input$filter_city != "All") df <- df %>% filter(city == input$filter_city)
+    if(input$filter_cat != "All") df <- df %>% filter(categoryName == input$filter_cat)
+    df <- df %>% filter(totalScore >= input$filter_rating[1], totalScore <= input$filter_rating[2])
+    
+    df_scale <- df %>% select(Skor_Kenyamanan, Skor_Popularitas) %>% scale()
+    hc_res <- hclust(dist(df_scale), method = input$linkage_method)
+    df$Cluster <- as.factor(cutree(hc_res, k = input$k_cluster))
+    
+    list(data = df, hc = hc_res, scale = df_scale)
+  })
+
+  # Render Plots (Sama seperti sebelumnya namun dengan penyesuaian warna)
+  output$plot_top_dest <- renderPlotly({
+    p <- processed_data()$data %>% arrange(desc(reviewsCount)) %>% head(10) %>%
+      ggplot(aes(x = reorder(title, reviewsCount), y = reviewsCount, fill = Cluster)) +
+      geom_col(width = 0.7) + coord_flip() + theme_minimal() +
+      scale_fill_brewer(palette = "Set2") + labs(x="", y="")
+    ggplotly(p)
+  })
+
+  output$plot_pie_cluster <- renderPlotly({
+    df_pie <- processed_data()$data %>% count(Cluster)
+    plot_ly(df_pie, labels = ~Cluster, values = ~n, type = 'pie', hole = 0.6) %>%
+      layout(showlegend = FALSE, margin = list(t=0, b=0, l=0, r=0))
+  })
+
+  output$plot_cluster_pca <- renderPlot({
+    fviz_cluster(list(data = processed_data()$scale, cluster = processed_data()$data$Cluster),
+                 palette = "Set2", geom = "point", ellipse.type = "convex", ggtheme = theme_minimal())
+  })
+  
+  output$plot_dendro <- renderPlot({
+    fviz_dend(processed_data()$hc, k = input$k_cluster, k_colors = "Set2", rect = TRUE, main = "")
+  })
+
+  output$plot_scatter <- renderPlotly({
+    p <- ggplot(processed_data()$data, aes(x = reviewsCount, y = totalScore, color = Cluster, text = title)) +
+      geom_point(alpha = 0.6, size = 3) + scale_x_log10() + theme_minimal()
+    ggplotly(p, tooltip = "text")
+  })
+
+  output$box_total_dest <- renderValueBox({
+    valueBox(nrow(processed_data()$data), "Destinations", icon = icon("map"), color = "primary")
+  })
+  
+  output$box_avg_rating <- renderValueBox({
+    valueBox(round(mean(processed_data()$data$totalScore), 2), "Avg Rating", icon = icon("star"), color = "warning")
+  })
+  
+  output$box_total_rev <- renderValueBox({
+    valueBox(format(sum(processed_data()$data$reviewsCount), big.mark=","), "Reviews", icon = icon("users"), color = "info")
+  })
+
+  output$table_raw <- renderDT({
+    datatable(processed_data()$data %>% select(title, city, totalScore, Cluster), options = list(pageLength = 7))
+  })
+
+  output$insight_box <- renderUI({
+    df <- processed_data()$data
+    summary_cluster <- df %>% group_by(Cluster) %>% summarise(avg_pop = mean(reviewsCount))
+    top_pop_cluster <- summary_cluster$Cluster[which.max(summary_cluster$avg_pop)]
+    
+    fluidRow(
+      infoBox("Top Cluster", paste("Cluster", top_pop_cluster), icon = icon("fire"), color = "danger", width = 6, fill = TRUE),
+      infoBox("Data Status", "Live Updated", icon = icon("check-circle"), color = "success", width = 6, fill = TRUE)
+    )
+  })
+}
+
+shinyApp(ui, server)
